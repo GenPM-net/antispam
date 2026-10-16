@@ -22,6 +22,36 @@ Protects public endpoints that write (forms, comments, newsletter, login): honey
 captcha (Cloudflare Turnstile or hCaptcha, optional) and fixed-window rate limits stored in Postgres with HMAC-hashed
 keys (no plain IPs or emails). Not a WAF or DDoS protection. Table: `rate_limits`.
 
+## Setup
+
+After `genpm add`, follow these steps (your AI agent finds the same steps in `src/lib/antispam/AGENTS.md` and can do them for you):
+
+1. Env: `ANTISPAM_SECRET` (≥ 32 random chars). Optional captcha: `TURNSTILE_SITE_KEY` + `TURNSTILE_SECRET_KEY`
+   (or `HCAPTCHA_SECRET_KEY`). Generate and apply migrations (see `src/lib/db/AGENTS.md`).
+   Client IP source (rate limits): by default the right-most `x-forwarded-for` hop, skipping
+   `ANTISPAM_TRUSTED_PROXIES - 1` more hops (default `1`: the address your last proxy saw). Behind a platform that sets
+   a dedicated header, set `ANTISPAM_IP_HEADER` (`cf-connecting-ip` on Cloudflare, `x-vercel-forwarded-for` on Vercel,
+   `x-real-ip`, `fly-client-ip`…). Platform headers are never trusted unless configured: clients can send them.
+2. When rendering the form (server), add two fields:
+   `<input {...honeypotProps} />` and `<input type="hidden" name="_ts" value={await formTimingToken()} />`.
+   With Turnstile, also render its widget (`<div class="cf-turnstile" data-sitekey={TURNSTILE_SITE_KEY}>` and its script).
+3. In the handler, before doing anything else:
+   ```ts
+   const check = await verifyHuman(request.headers, formData, { scope: 'forms:contact' });
+   if (!check.ok) return Response.json({ error: check.reason }, { status: check.reason === 'rate_limited' ? 429 : 400 });
+   ```
+4. Per-account limits (login, password reset): `await rateLimit(`login:${email}`, { limit: 5, windowMs: 900_000 })`.
+5. Schedule `pruneRateLimits()` daily (e.g. with @core/jobs).
+6. Verify: submitting within 2 s or with the honeypot filled is rejected; a normal submission passes.
+
+## What's inside
+
+Paths are relative to `src/lib/antispam`.
+
+- `index.ts` — public API: `verifyHuman`, `rateLimit`, `formTimingToken`, `honeypotProps`, `verifyCaptcha`, `clientIp`, `pruneRateLimits`.
+- `verify.ts` — the full check. `checks.ts` — individual checks. `rate-limit.ts` — limiter. `schema.ts` — table.
+- `react.ts` — `<AntispamFields />` (async server component) with the honeypot and the signed timing field for HTML forms.
+
 ## At a glance
 
 - **GenPM dependencies** (installed with it): [@core/db](https://genpm.net/p/@core/db)
